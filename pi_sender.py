@@ -36,7 +36,7 @@ except Exception as e:
 import requests
 
 # ---------- Configuration (via environment variables) ----------
-HTTP_PUBLISH_URL = os.environ.get("HTTP_PUBLISH_URL", "https://sonar-render-2-1.onrender.com")
+HTTP_PUBLISH_URL = os.environ.get("HTTP_PUBLISH_URL", "https://sonar-render-2-1.onrender.com/publish")
 PUB_TOKEN = os.environ.get("PUB_TOKEN", "")              # optional token to include in X-Pub-Token header
 SAMPLE_INTERVAL = float(os.environ.get("SAMPLE_INTERVAL", "0.5"))  # seconds between readings
 TRIG = int(os.environ.get("TRIG_GPIO", "5"))             # BCM pin for TRIG (default 5)
