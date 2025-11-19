@@ -1,126 +1,91 @@
-#!/usr/bin/env python3
-"""
-server.py — FastAPI backend for sonar-render system
-POST /publish receives sensor updates from the Pi
-GET / returns the web viewer (static/index.html)
-WebSocket /ws/viewer broadcasts updates to all viewers
-"""
-
-import os
+# server.py
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
+from fastapi import Request, HTTPException
+import uvicorn
+import os   
+import asyncio
 import json
-import logging
 from typing import List
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
 app = FastAPI()
-
-# Allow browser clients and Pi sender
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# -----------------------------
-# Serve static files correctly
-# -----------------------------
-# All static files (index.html, JS, CSS, images)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Serve index.html at root
-@app.get("/", response_class=FileResponse)
-def root():
-    return FileResponse("static/index.html")
-
-# -----------------------------
-# Shared viewer connection manager
-# -----------------------------
-class ViewerManager:
+class ConnectionManager:
     def __init__(self):
-        self.active_viewers: List[WebSocket] = []
+        self.viewers: List[WebSocket] = []
+        self.publishers: List[WebSocket] = []
+        self.lock = asyncio.Lock()
 
-    async def connect(self, ws: WebSocket):
+    async def connect_viewer(self, ws: WebSocket):
         await ws.accept()
-        self.active_viewers.append(ws)
-        logging.info(f"Viewer connected. Total: {len(self.active_viewers)}")
+        async with self.lock:
+            self.viewers.append(ws)
 
-    def disconnect(self, ws: WebSocket):
-        if ws in self.active_viewers:
-            self.active_viewers.remove(ws)
-        logging.info(f"Viewer disconnected. Total: {len(self.active_viewers)}")
+    async def connect_publisher(self, ws: WebSocket):
+        await ws.accept()
+        async with self.lock:
+            self.publishers.append(ws)
 
-    async def broadcast(self, message: str):
-        """Send data to all connected viewer websockets."""
-        dead = []
-        for ws in self.active_viewers:
-            try:
-                await ws.send_text(message)
-            except Exception:
-                dead.append(ws)
+    async def disconnect(self, ws: WebSocket):
+        async with self.lock:
+            if ws in self.viewers: self.viewers.remove(ws)
+            if ws in self.publishers: self.publishers.remove(ws)
 
-        # Remove broken sockets
-        for ws in dead:
-            self.disconnect(ws)
+    async def broadcast_to_viewers(self, message: str):
+        async with self.lock:
+            for v in list(self.viewers):
+                try:
+                    await v.send_text(message)
+                except Exception:
+                    await self.disconnect(v)
 
-manager = ViewerManager()
+manager = ConnectionManager()
 
-# -----------------------------
-# Data model for POST /publish
-# -----------------------------
-class SonarData(BaseModel):
-    distance_m: float
-    angle_deg: float
-    timestamp: str
-
-
-# -----------------------------
-# POST endpoint for Pi sender
-# -----------------------------
 @app.post("/publish")
-async def publish(request: Request, payload: SonarData):
-    """Receives JSON from Pi and broadcasts to all viewers."""
-    token = request.headers.get("x-pub-token")
-    required = os.environ.get("PUBLISH_TOKEN")
+async def publish(request: Request):
+    """
+    Accept JSON from HTTP POST and broadcast to all connected viewers.
+    Return {"status":"ok"} on success.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid_json")
 
-    if not required:
-        logging.warning("PUBLISH_TOKEN missing — accepting all publishers.")
+    # OPTIONAL: very basic validation (distance_m present or null)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="invalid_payload")
 
-    if required and token != required:
-        return {"error": "unauthorized"}
-
-    msg = payload.dict()
-    logging.info(f"Publish received: {msg}")
-
-    await manager.broadcast(json.dumps(msg))
+    # Broadcast to viewers (existing manager.broadcast_to_viewers)
+    # ensure payload is JSON string
+    await manager.broadcast_to_viewers(json.dumps(payload))
     return {"status": "ok"}
 
+@app.get("/")
+async def index():
+    return HTMLResponse(open("static/index.html","r",encoding="utf-8").read())
 
-# -----------------------------
-# WebSocket for viewer clients
-# -----------------------------
-@app.websocket("/ws/viewer")
-async def ws_viewer(websocket: WebSocket):
-    await manager.connect(websocket)
+@app.websocket("/ws/publisher")
+async def websocket_publisher(ws: WebSocket):
+    await manager.connect_publisher(ws)
     try:
         while True:
-            # viewer rarely sends messages, but keep connection alive
-            await websocket.receive_text()
+            data = await ws.receive_text()
+            await manager.broadcast_to_viewers(data)
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-    except Exception:
-        manager.disconnect(websocket)
+        await manager.disconnect(ws)
 
-# -----------------------------
-# If running locally: uvicorn server.py
-# -----------------------------
+@app.websocket("/ws/viewer")
+async def websocket_viewer(ws: WebSocket):
+    await manager.connect_viewer(ws)
+    try:
+        while True:
+            # viewers may send keepalive pings; this keeps the connection open
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        await manager.disconnect(ws)
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8000)
+    uvicorn.run("server:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
