@@ -21,17 +21,15 @@
   </div>
 
 <script>
-/* ---------- CONFIG ---------- */
 const SERVER = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/viewer';
-const MAX_RANGE_M = 6.0;                // max measurable/render range (meters)
-const ARC_COUNT = 6;                    // number of Wi-Fi arcs (concentric semicircles)
-const OUTER_MARGIN = 0.85;              // fraction of canvas half-width used for outermost arc
-const SUDDEN_CHANGE_THRESHOLD_M = 0.35; // threshold (m) to declare a sudden change / fish event
-const DETECTION_FADE_MS = 2000;         // how long a detection marker stays (ms)
-const PULSE_DURATION_MS = 1200;         // pulse animation length for fish events
-const KEEP_HISTORY = 20;                // keep last N detections for trail
+const MAX_RANGE_M = 6.0;
+const ARC_COUNT = 6;
+const OUTER_MARGIN = 0.85;
+const SUDDEN_CHANGE_THRESHOLD_M = 0.35;
+const DETECTION_FADE_MS = 2000;
+const PULSE_DURATION_MS = 1200;
+const KEEP_HISTORY = 20;
 
-/* ---------- STATE ---------- */
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 const statusSpan = document.getElementById('status');
@@ -39,43 +37,34 @@ const rangeSpan = document.getElementById('range');
 
 let ws = null;
 let lastDistance = null;
-let lastTimestamp = null;
-let detections = []; // {x,y,radius_m,distance_m,angle_deg,timestamp,type: 'normal'|'pulse'}
+let detections = [];
 let wsConnected = false;
 
-/* ---------- UTILS ---------- */
 function nowMs(){ return Date.now(); }
 function clamp(v,a,b){ return Math.max(a, Math.min(b,v)); }
 
-/* ---------- DRAW ---------- */
 function drawBackground(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
-  // centered top origin
   const cx = canvas.width/2;
-  const cy = canvas.height * 0.18; // origin near top
+  const cy = canvas.height * 0.18;
   const halfWidth = canvas.width * 0.5;
   const maxRadiusPx = halfWidth * OUTER_MARGIN;
 
-  // draw faint central marker (origin)
   ctx.beginPath();
   ctx.fillStyle = "#0f0";
   ctx.arc(cx, cy, 4, 0, Math.PI*2);
   ctx.fill();
 
-  // draw arcs (inverted Wi-Fi: semicircles opening downward, angle 0..PI)
   for(let i=ARC_COUNT; i>=1; --i){
     const t = i / ARC_COUNT;
     const r = t * maxRadiusPx;
-    // stroke style: varying alpha
     ctx.beginPath();
     ctx.lineWidth = 3;
     const alpha = 0.14 + 0.5*(t*0.7);
     ctx.strokeStyle = `rgba(0,255,0,${alpha})`;
-    // arc from 0 to PI (downwards semicircle)
     ctx.arc(cx, cy, r, 0, Math.PI);
     ctx.stroke();
 
-    // inner soft fill for larger arcs
     if(i === ARC_COUNT){
       const g = ctx.createRadialGradient(cx, cy, 10, cx, cy + r, r);
       g.addColorStop(0, "rgba(0,255,0,0.06)");
@@ -89,7 +78,6 @@ function drawBackground(){
     }
   }
 
-  // draw tick labels at each arc (distance)
   ctx.fillStyle = "#0f0";
   ctx.font = "13px monospace";
   ctx.textAlign = "center";
@@ -97,7 +85,7 @@ function drawBackground(){
     const t = i / ARC_COUNT;
     const r = t * maxRadiusPx;
     const dist = (t * MAX_RANGE_M).toFixed(2);
-    ctx.fillText(`${dist} m`, cx, cy + r + 16); // below arc
+    ctx.fillText(`${dist} m`, cx, cy + r + 16);
   }
 
   return {cx,cy,maxRadiusPx};
@@ -105,8 +93,6 @@ function drawBackground(){
 
 function render(){
   const {cx,cy,maxRadiusPx} = drawBackground();
-
-  // draw historical detections (fade by age)
   const now = nowMs();
   for(let i=0;i<detections.length;i++){
     const d = detections[i];
@@ -114,7 +100,6 @@ function render(){
     if(age > DETECTION_FADE_MS + PULSE_DURATION_MS) continue;
     const fade = 1 - clamp(age / (DETECTION_FADE_MS + PULSE_DURATION_MS), 0, 1);
     if(d.type === 'pulse'){
-      // pulsing ring
       const t = clamp((now - d.timestamp) / PULSE_DURATION_MS, 0, 1);
       const pulseR = (1 + 0.5 * t) * (d.radius_px || 6);
       ctx.beginPath();
@@ -122,61 +107,42 @@ function render(){
       ctx.strokeStyle = `rgba(255,0,0,${0.9 * fade})`;
       ctx.arc(d.x, d.y, pulseR, 0, Math.PI*2);
       ctx.stroke();
-      // small center
       ctx.beginPath();
       ctx.fillStyle = `rgba(255,0,0,${0.95 * fade})`;
       ctx.arc(d.x, d.y, 6, 0, Math.PI*2);
       ctx.fill();
     } else {
-      // normal detection (small dot + fading label)
       ctx.beginPath();
       ctx.fillStyle = `rgba(255,0,0,${0.95 * fade})`;
       ctx.arc(d.x, d.y, 5, 0, Math.PI*2);
       ctx.fill();
-      if(fade > 0.6){
-        ctx.fillStyle = `rgba(0,255,0,${0.7 * fade})`;
-        ctx.font = "12px monospace";
-        ctx.fillText(`${d.distance_m.toFixed(2)} m`, d.x + 12, d.y - 8);
-      }
     }
   }
-
-  // request next frame
   requestAnimationFrame(render);
 }
 
-/* ---------- MAPPING helpers ---------- */
 function distanceToRadiusPx(distance_m, maxRadiusPx){
   const frac = clamp(distance_m / MAX_RANGE_M, 0, 1);
   return frac * maxRadiusPx;
 }
 
 function polarToCanvas(cx, cy, radius_px, angle_deg){
-  // angle_deg is relative to center line (0 = center-down). Convert: 0 corresponds to 90deg = PI/2
   const angle_rad = (Math.PI/2) + (angle_deg * Math.PI/180.0);
   const x = cx + radius_px * Math.cos(angle_rad);
   const y = cy + radius_px * Math.sin(angle_rad);
   return {x,y};
 }
 
-/* ---------- WebSocket and message handling ---------- */
 function handlePayload(payload){
-  // expected payload: {distance_m, angle_deg, timestamp, quality}
   try {
     const distance_m = (payload.distance_m === null || payload.distance_m === undefined) ? null : Number(payload.distance_m);
     const angle_deg = (payload.angle_deg === undefined || payload.angle_deg === null) ? 0 : Number(payload.angle_deg);
     const ts = payload.timestamp ? Date.parse(payload.timestamp) : nowMs();
-
-    // update UI
     rangeSpan.textContent = MAX_RANGE_M.toFixed(2);
-
-    // compute location
-    // we need current canvas mapping (cx,cy,maxRadiusPx)
-    const {cx,cy,maxRadiusPx} = drawBackground(); // drawBackground also returns geometry (but note: render loop will redraw)
+    const {cx,cy,maxRadiusPx} = drawBackground();
     if(distance_m !== null){
       const radius_px = distanceToRadiusPx(distance_m, maxRadiusPx);
       const pos = polarToCanvas(cx, cy, radius_px, angle_deg);
-      // check sudden change (fish event)
       let isPulse = false;
       if(lastDistance !== null){
         const delta = Math.abs(distance_m - lastDistance);
@@ -185,24 +151,10 @@ function handlePayload(payload){
         }
       }
       lastDistance = distance_m;
-      lastTimestamp = ts;
-
-      const dobj = {
-        x: pos.x, y: pos.y,
-        radius_px,
-        distance_m,
-        angle_deg,
-        timestamp: nowMs(),
-        type: isPulse ? 'pulse' : 'normal'
-      };
-
-      detections.push(dobj);
-      // keep history short
+      detections.push({x:pos.x,y:pos.y,radius_px,distance_m,angle_deg,timestamp:nowMs(),type:isPulse?'pulse':'normal'});
       if(detections.length > KEEP_HISTORY) detections.shift();
     } else {
-      // no echo; treat as a special pulse at outer ring
       lastDistance = null;
-      const {cx,cy,maxRadiusPx} = drawBackground();
       const pos = polarToCanvas(cx, cy, maxRadiusPx, 0);
       detections.push({x:pos.x,y:pos.y,distance_m:null,timestamp:nowMs(),type:'pulse',radius_px:10});
       if(detections.length > KEEP_HISTORY) detections.shift();
@@ -213,60 +165,23 @@ function handlePayload(payload){
 }
 
 function connectWS(){
-  try {
-    ws = new WebSocket(SERVER);
-  } catch(e){
-    console.error("WS construct error", e);
-    statusSpan.textContent = "error";
-    setTimeout(connectWS, 3000);
-    return;
-  }
+  try { ws = new WebSocket(SERVER); } catch(e){ statusSpan.textContent = "error"; setTimeout(connectWS, 3000); return; }
 
-  ws.onopen = () => {
-    wsConnected = true;
-    statusSpan.textContent = "connected";
-    // keepalive (simple)
-    setInterval(()=>{ try{ ws.send('ping'); } catch(e){} }, 20000);
-  };
-
-  ws.onmessage = (ev) => {
-    // ignore manual pings
-    const s = ev.data;
-    // try parse JSON
-    try {
-      const payload = JSON.parse(s);
-      handlePayload(payload);
-    } catch(e) {
-      // not JSON — ignore
-    }
-  };
-
-  ws.onclose = () => {
-    wsConnected = false;
-    statusSpan.textContent = "disconnected";
-    setTimeout(connectWS, 2000);
-  };
-
-  ws.onerror = (e) => {
-    wsConnected = false;
-    statusSpan.textContent = "error";
-    console.error("WebSocket error", e);
-    ws.close();
-  };
+  ws.onopen = () => { wsConnected=true; statusSpan.textContent="connected"; setInterval(()=>{ try{ ws.send('ping'); }catch{} },20000); };
+  ws.onmessage = (ev) => { try{ handlePayload(JSON.parse(ev.data)); }catch{} };
+  ws.onclose = () => { wsConnected=false; statusSpan.textContent="disconnected"; setTimeout(connectWS,2000); };
+  ws.onerror = (e) => { wsConnected=false; statusSpan.textContent="error"; ws.close(); };
 }
 
-/* ---------- RESIZE handling ---------- */
 function resizeCanvas(){
-  // choose a responsive size keeping aspect ratio
   const parent = canvas.parentElement;
-  const w = Math.min(window.innerWidth * 0.98, 1200);
-  const h = Math.min(window.innerHeight * 0.9, 900);
+  const w = Math.min(window.innerWidth*0.98,1200);
+  const h = Math.min(window.innerHeight*0.9,900);
   canvas.width = Math.round(w);
   canvas.height = Math.round(h);
 }
-window.addEventListener('resize', resizeCanvas);
 
-/* ---------- START ---------- */
+window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 render();
 connectWS();
